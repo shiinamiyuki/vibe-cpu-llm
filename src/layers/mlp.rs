@@ -23,9 +23,14 @@ pub struct GatedMlp {
 impl GatedMlp {
     /// Forward pass for a single hidden vector of shape (hidden_size,).
     /// Returns a vector of shape (hidden_size,).
+    ///
+    /// `gate_proj` and `up_proj` are computed in parallel via `rayon::join`
+    /// since they are independent and each is a large matvec.
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        let gate = self.gate_proj.forward(x).silu();
-        let up = self.up_proj.forward(x);
+        let (gate, up) = rayon::join(
+            || self.gate_proj.forward(x).silu(),
+            || self.up_proj.forward(x),
+        );
         let hidden = gate.mul(&up);
         self.down_proj.forward(&hidden)
     }

@@ -1,4 +1,7 @@
 use half::bf16;
+use rayon::prelude::*;
+
+use super::simd::bf16_dot_f32;
 
 /// A minimal, row-major, f32 tensor used for activations and intermediate values.
 ///
@@ -259,6 +262,8 @@ impl Bf16Tensor {
     /// Matrix-vector multiply: (M, K) × (K,) → (M,).
     /// The matrix (self) is bf16; the vector and output are f32.
     /// Conversion from bf16 → f32 happens element-by-element in the inner loop.
+    ///
+    /// Rows are processed in parallel via rayon.
     pub fn matvec(&self, vec: &Tensor) -> Tensor {
         assert_eq!(self.ndim(), 2, "Bf16Tensor::matvec: matrix must be 2-D");
         assert_eq!(vec.ndim(), 1, "Bf16Tensor::matvec: vec must be 1-D");
@@ -266,16 +271,14 @@ impl Bf16Tensor {
         let k = self.shape[1];
         assert_eq!(vec.shape[0], k, "Bf16Tensor::matvec: dimension mismatch");
 
-        let mut out = vec![0.0f32; m];
-        for i in 0..m {
-            let row_start = i * k;
-            let mut sum = 0.0f32;
-            for j in 0..k {
-                let w = bf16::from_bits(self.data[row_start + j]).to_f32();
-                sum += w * vec.data[j];
-            }
-            out[i] = sum;
-        }
+        let vec_data = &vec.data;
+        let out: Vec<f32> = self
+            .data
+            .par_chunks_exact(k)
+            .map(|row| bf16_dot_f32(row, vec_data))
+            .collect();
+
+        debug_assert_eq!(out.len(), m);
         Tensor::new(out, vec![m])
     }
 

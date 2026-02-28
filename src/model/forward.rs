@@ -142,12 +142,17 @@ impl Cohere2Model {
         let mut hidden = self.embed_tokens.forward(token_id);
 
         // 2. Run through all decoder layers
-        for (i, layer) in self.layers.iter().enumerate() {
+        for i in 0..self.layers.len() {
+            let layer = &self.layers[i];
             let normed = layer.input_layernorm.forward(&hidden);
 
-            // Parallel block: attn and mlp both operate on the same normed input
-            let attn_out = layer.self_attn.forward(&normed, pos, &mut self.kv_caches[i]);
-            let mlp_out = layer.mlp.forward(&normed);
+            // Parallel block: attn and mlp both operate on the same normed input.
+            // We split the borrows so rayon::join can run both concurrently.
+            let cache = &mut self.kv_caches[i];
+            let (attn_out, mlp_out) = rayon::join(
+                || layer.self_attn.forward(&normed, pos, cache),
+                || layer.mlp.forward(&normed),
+            );
 
             // Residual connection: x = x + attn(ln(x)) + mlp(ln(x))
             hidden = hidden.add(&attn_out).add(&mlp_out);

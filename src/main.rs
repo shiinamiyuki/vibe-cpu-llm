@@ -13,6 +13,7 @@
 /// - Generation uses greedy decoding (argmax) for simplicity.
 
 use std::io::Write;
+use std::time::Instant;
 
 use tokenizers::Tokenizer;
 
@@ -80,6 +81,7 @@ fn main() {
 
     // Prefill: run all prompt tokens through the model
     eprintln!("Running prefill ({} tokens)...", input_ids.len());
+    let prefill_start = Instant::now();
     let mut logits = Vec::new();
     for (pos, &token_id) in input_ids.iter().enumerate() {
         logits = model.forward(token_id, pos);
@@ -87,12 +89,19 @@ fn main() {
             eprint!("  pos {} / {} ...\r", pos, input_ids.len());
         }
     }
-    eprintln!("Prefill done.                    ");
+    let prefill_elapsed = prefill_start.elapsed();
+    eprintln!(
+        "Prefill done. {} tokens in {:.2}s ({:.2} tok/s)",
+        input_ids.len(),
+        prefill_elapsed.as_secs_f64(),
+        input_ids.len() as f64 / prefill_elapsed.as_secs_f64()
+    );
 
     // Greedy decode
     eprintln!("Generating (max {} tokens)...", max_tokens);
     let mut generated_tokens: Vec<u32> = Vec::new();
     let mut pos = input_ids.len();
+    let decode_start = Instant::now();
 
     for step in 0..max_tokens {
         // Argmax over logits
@@ -123,8 +132,18 @@ fn main() {
     }
 
     println!();
+    let decode_elapsed = decode_start.elapsed();
+    let num_gen = generated_tokens.len();
+    if num_gen > 0 {
+        eprintln!(
+            "Decode: {} tokens in {:.2}s ({:.2} tok/s)",
+            num_gen,
+            decode_elapsed.as_secs_f64(),
+            num_gen as f64 / decode_elapsed.as_secs_f64()
+        );
+    }
     eprintln!(
-        "Generated {} tokens total.",
-        generated_tokens.len()
+        "Total: {:.2}s",
+        prefill_elapsed.as_secs_f64() + decode_elapsed.as_secs_f64()
     );
 }

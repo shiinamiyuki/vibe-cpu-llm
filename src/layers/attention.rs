@@ -19,7 +19,10 @@
 
 use super::linear::Linear;
 use super::rope::RoPE;
+use super::simd::{f32_dot_f32, f32_saxpy};
 use super::tensor::Tensor;
+
+use rayon::prelude::*;
 
 /// Attention type for each layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,53 +99,57 @@ impl Attention {
 
         let num_groups = self.num_heads / self.num_kv_heads;
 
-        // Compute attention per query head
-        let mut head_outputs: Vec<Tensor> = Vec::with_capacity(self.num_heads);
+        // Compute attention per query head — parallelized across heads
+        let head_outputs: Vec<Vec<f32>> = (0..self.num_heads)
+            .into_par_iter()
+            .map(|h| {
+                let kv_h = h / num_groups; // which KV head this query head uses
 
-        for h in 0..self.num_heads {
-            let kv_h = h / num_groups; // which KV head this query head uses
+                // Extract this head's query: slice [h*head_dim .. (h+1)*head_dim]
+                let q_start = h * self.head_dim;
+                let q_end = q_start + self.head_dim;
+                let q_head = &q.data[q_start..q_end];
 
-            // Extract this head's query: slice [h*head_dim .. (h+1)*head_dim]
-            let q_head = q.slice(h * self.head_dim, (h + 1) * self.head_dim);
+                let kv_start = kv_h * self.head_dim;
+                let kv_end = kv_start + self.head_dim;
 
-            // Compute attention scores against all cached keys in [start..seq_len]
-            let attend_len = seq_len - start;
-            let mut scores = Vec::with_capacity(attend_len);
+                // Compute attention scores against all cached keys in [start..seq_len]
+                let attend_len = seq_len - start;
+                let scale = 1.0 / (self.head_dim as f32).sqrt();
 
-            let scale = 1.0 / (self.head_dim as f32).sqrt();
-
-            for t in start..seq_len {
-                // Extract this KV head's key at position t
-                let k_t = cache.keys[t].slice(
-                    kv_h * self.head_dim,
-                    (kv_h + 1) * self.head_dim,
-                );
-                scores.push(q_head.dot(&k_t) * scale);
-            }
-
-            // Softmax over scores
-            let scores_tensor = Tensor::new(scores, vec![attend_len]);
-            let attn_weights = scores_tensor.softmax();
-
-            // Weighted sum of values
-            let mut out_head = vec![0.0f32; self.head_dim];
-            for (idx, t) in (start..seq_len).enumerate() {
-                let v_t = cache.values[t].slice(
-                    kv_h * self.head_dim,
-                    (kv_h + 1) * self.head_dim,
-                );
-                let w = attn_weights.data[idx];
-                for d in 0..self.head_dim {
-                    out_head[d] += w * v_t.data[d];
+                let mut scores = Vec::with_capacity(attend_len);
+                for t in start..seq_len {
+                    let k_data = &cache.keys[t].data[kv_start..kv_end];
+                    let dot = f32_dot_f32(q_head, k_data);
+                    scores.push(dot * scale);
                 }
-            }
 
-            head_outputs.push(Tensor::new(out_head, vec![self.head_dim]));
-        }
+                // Softmax over scores
+                let max_val = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let mut exps: Vec<f32> = scores.iter().map(|&s| (s - max_val).exp()).collect();
+                let sum: f32 = exps.iter().sum();
+                for e in &mut exps {
+                    *e /= sum;
+                }
+
+                // Weighted sum of values
+                let mut out_head = vec![0.0f32; self.head_dim];
+                for (idx, t) in (start..seq_len).enumerate() {
+                    let v_data = &cache.values[t].data[kv_start..kv_end];
+                    let w = exps[idx];
+                    f32_saxpy(&mut out_head, w, v_data);
+                }
+
+                out_head
+            })
+            .collect();
 
         // Concatenate all head outputs → (hidden_size,)
-        let attn_out = Tensor::cat(&head_outputs);
-        assert_eq!(attn_out.shape[0], hidden_size);
+        let mut attn_data = Vec::with_capacity(hidden_size);
+        for head in &head_outputs {
+            attn_data.extend_from_slice(head);
+        }
+        let attn_out = Tensor::new(attn_data, vec![hidden_size]);
 
         // Output projection
         self.o_proj.forward(&attn_out)

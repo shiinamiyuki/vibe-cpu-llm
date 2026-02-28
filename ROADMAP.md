@@ -12,5 +12,20 @@
 - [x] Linear Layer.
     - [x] bf16 (weights stored as bf16 `Vec<u16>`, bf16→f32 conversion in matvec inner loop)
     - [ ] fp8
+- [x] Rayon parallelization
+    - [x] Matvec: rows processed in parallel via `par_chunks_exact`
+    - [x] MLP: gate_proj + up_proj run concurrently via `rayon::join`
+    - [x] Attention: per-head computation parallelized via `into_par_iter`
+    - [x] Parallel block: attn + mlp run concurrently via `rayon::join`
+    - Measured: ~3 tok/s decode on ARM64 Windows (tiny-aya, single sequence)
+- [x] SIMD-optimized bf16→f32 + fused dot product kernels
+    - [x] aarch64 NEON: `vshll`/`vmovl` + `vfmaq_f32`, 4 accumulators × 4 lanes, 16 elements/iter
+    - [x] x86_64 AVX2+FMA: `vpmovzxwd`+`vpslld` + `vfmadd231ps`, 4 acc × 8 lanes, 32 elements/iter
+    - [x] Scalar fallback for other architectures
+    - Measured: ~11.3 tok/s decode on ARM64 Windows (3.7× speedup over scalar)
+- [x] SIMD-optimized attention (f32·f32 dot product + SAXPY for value accumulation)
+    - [x] NEON / AVX2+FMA kernels for QK dot and weighted V accumulation
+    - Measured: ~13.6 tok/s decode at 128+ tokens context (scales with sequence length)
+- [ ] Batched prefill (process multiple prompt tokens per forward call)
 - Supported Models
     - [x] tiny-aya (Cohere2ForCausalLM, 36 layers, GQA 16Q/4KV, SwiGLU MLP, parallel blocks)

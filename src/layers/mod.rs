@@ -18,3 +18,4 @@ pub mod rope;
 pub mod attention;
 pub mod mlp;
 pub mod embedding;
+pub mod simd;
