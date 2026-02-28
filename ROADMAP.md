@@ -1,0 +1,16 @@
+- [x] Find some good tokenizer library and integrate it
+    - Using `tokenizers` crate (HuggingFace) v0.21 — loads `tokenizer.json` directly
+- [x] Basic model definition and loading
+    - Cohere2ForCausalLM architecture implemented in `src/model/`
+    - Weights loaded from sharded safetensors via `memmap2`
+    - Weights stay in bf16 in memory; converted to f32 on-the-fly during compute
+- [ ] Flash Attention v2
+- [ ] Paged KV cache
+- [x] Sliding Window Attention
+    - Per-layer hybrid: full causal for every 4th layer, sliding window (4096) for rest
+    - Controlled by `layer_types` array from config.json
+- [x] Linear Layer.
+    - [x] bf16 (weights stored as bf16 `Vec<u16>`, bf16→f32 conversion in matvec inner loop)
+    - [ ] fp8
+- Supported Models
+    - [x] tiny-aya (Cohere2ForCausalLM, 36 layers, GQA 16Q/4KV, SwiGLU MLP, parallel blocks)
