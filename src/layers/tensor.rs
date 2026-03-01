@@ -293,4 +293,41 @@ impl Bf16Tensor {
             .collect();
         Tensor::new(data, vec![cols])
     }
+
+    /// Fused gate+up matvec for SwiGLU MLP.
+    ///
+    /// Given two weight matrices `gate` (M×K) and `up` (M×K) and an input
+    /// vector `x` (K,), computes for each output row `i`:
+    ///
+    ///   out[i] = silu(gate_row[i] · x)  *  (up_row[i] · x)
+    ///
+    /// This avoids allocating two separate intermediate tensors for the gate
+    /// and up projections, instead writing the fused result directly into a
+    /// single output buffer. Rows are processed in parallel via rayon.
+    ///
+    /// Both `gate` and `up` must have the same shape (M, K).
+    pub fn fused_gate_up_matvec(gate: &Bf16Tensor, up: &Bf16Tensor, x: &Tensor) -> Tensor {
+        debug_assert_eq!(gate.shape, up.shape, "gate and up must have the same shape");
+        assert_eq!(gate.ndim(), 2);
+        assert_eq!(x.ndim(), 1);
+        let m = gate.shape[0];
+        let k = gate.shape[1];
+        assert_eq!(x.shape[0], k);
+
+        let x_data = &x.data;
+        let out: Vec<f32> = gate
+            .data
+            .par_chunks_exact(k)
+            .zip(up.data.par_chunks_exact(k))
+            .map(|(gate_row, up_row)| {
+                let g = bf16_dot_f32(gate_row, x_data);
+                let u = bf16_dot_f32(up_row, x_data);
+                // silu(g) = g * sigmoid(g) = g / (1 + exp(-g))
+                let sg = g * (1.0 / (1.0 + (-g).exp()));
+                sg * u
+            })
+            .collect();
+
+        Tensor::new(out, vec![m])
+    }
 }

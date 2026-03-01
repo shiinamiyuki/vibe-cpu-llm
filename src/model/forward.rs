@@ -144,6 +144,8 @@ impl Cohere2Model {
         // 2. Run through all decoder layers
         for i in 0..self.layers.len() {
             let layer = &self.layers[i];
+
+            // Compute normed input for this layer (clones hidden for the norm)
             let normed = layer.input_layernorm.forward(&hidden);
 
             // Parallel block: attn and mlp both operate on the same normed input.
@@ -154,12 +156,15 @@ impl Cohere2Model {
                 || layer.mlp.forward(&normed),
             );
 
-            // Residual connection: x = x + attn(ln(x)) + mlp(ln(x))
-            hidden = hidden.add(&attn_out).add(&mlp_out);
+            // Fused residual accumulation: hidden += attn_out + mlp_out (single pass).
+            // No separate allocation — avoids the two .add().add() chain.
+            for j in 0..hidden.data.len() {
+                hidden.data[j] += attn_out.data[j] + mlp_out.data[j];
+            }
         }
 
-        // 3. Final layer norm
-        hidden = self.final_norm.forward(&hidden);
+        // 3. Final layer norm (in-place)
+        self.final_norm.forward_inplace(&mut hidden);
 
         // 4. LM head (tied embedding weights): logits = embed_weight @ hidden
         let logits = self.embed_tokens.logits(&hidden);
